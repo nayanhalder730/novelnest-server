@@ -1,13 +1,24 @@
+
 {
   "name": "novelnest-server",
   "version": "1.0.0",
-  "description": "",
+  "description": "NovelNest Backend API",
   "main": "index.js",
   "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "dotenv": "^18.0.9",
+    "express": "^5.3.0",
+    "mongodb": "^7.8.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
 }
