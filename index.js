@@ -543,10 +543,11 @@ app.get("/borrows", requireAuth, async (req, res) => {
     const borrows = await borrowsCollection
       .aggregate([
         {
-          $match: {
-            userEmail: req.user.email,
-          },
-        },
+  $match: {
+    userEmail: req.user.email,
+    status: "borrowed",
+  },
+},
         {
           $lookup: {
             from: "books",
