@@ -8,13 +8,15 @@ const requireAuth = async (req, res, next) => {
       headers: fromNodeHeaders(req.headers),
     });
 
-    if (!session?.user) {
+    // Check whether the user has a valid session.
+    if (!session?.user || !session?.session) {
       return res.status(401).json({
         success: false,
         message: "Unauthorized! Please login first.",
       });
     }
 
+    // Attach authenticated user information to request.
     req.user = {
       id: session.user.id,
       name: session.user.name || "Unknown User",
@@ -23,9 +25,9 @@ const requireAuth = async (req, res, next) => {
 
     req.session = session.session;
 
-    return next();
+    next();
   } catch (error) {
-    console.error("Authentication error:", error);
+    console.error("Authentication middleware error:", error);
 
     return res.status(500).json({
       success: false,

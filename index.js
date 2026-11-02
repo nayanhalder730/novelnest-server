@@ -93,10 +93,7 @@ const getImageBuffer = (imageData) => {
 const parseCopies = (value) => {
   const copies = Number(value);
 
-  if (
-    !Number.isInteger(copies) ||
-    copies < 1
-  ) {
+  if (!Number.isInteger(copies) || copies < 1) {
     return null;
   }
 
@@ -139,11 +136,11 @@ const getAllBooks = async (req, res) => {
 
 app.get("/books", getAllBooks);
 
-// Compatibility route for existing frontend requests
+// Compatibility route
 app.get("/allBooks", getAllBooks);
 
 // Get single book details
-app.get("/books/:id", async (req, res) => {
+app.get("/books/:id", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -552,7 +549,6 @@ app.post("/borrows", requireAuth, async (req, res) => {
       });
     }
 
-    // Atomically reserve one available copy.
     const reservation = await booksCollection.updateOne(
       {
         _id: objectBookId,
@@ -580,15 +576,32 @@ app.post("/borrows", requireAuth, async (req, res) => {
 
     reservedBookId = objectBookId;
 
+    const borrowedBook = await booksCollection.findOne(
+      { _id: objectBookId },
+      {
+        projection: {
+          title: 1,
+          imageName: 1,
+        },
+      }
+    );
+
+    const borrowDate = new Date();
+    const returnDate = new Date(borrowDate);
+    returnDate.setUTCDate(returnDate.getUTCDate() + 7);
+
     const borrowDocument = {
       bookId: objectBookId,
+      bookTitle: borrowedBook?.title || "",
+      bookImage: borrowedBook ? `/book-image/${borrowedBook._id}` : "",
       userId: req.user.id,
       userName: req.user.name,
       userEmail: req.user.email,
 
-      borrowDate: new Date(),
-      status: "borrowed",
+      borrowDate,
+      returnDate,
       returnedAt: null,
+      status: "borrowed",
     };
 
     const result = await borrowsCollection.insertOne(borrowDocument);
@@ -603,7 +616,6 @@ app.post("/borrows", requireAuth, async (req, res) => {
   } catch (error) {
     console.error("Borrow book error:", error);
 
-    // Restore the reserved copy if borrow creation failed.
     if (reservedBookId) {
       try {
         await booksCollection.updateOne(
@@ -700,7 +712,6 @@ app.delete("/borrows/:id", requireAuth, async (req, res) => {
 
     const borrowId = getBookId(id);
 
-    // Only the borrower can return their active borrow.
     const borrow = await borrowsCollection.findOne({
       _id: borrowId,
       userId: req.user.id,
@@ -714,7 +725,6 @@ app.delete("/borrows/:id", requireAuth, async (req, res) => {
       });
     }
 
-    // Atomically change borrowed -> returned.
     const updateResult = await borrowsCollection.updateOne(
       {
         _id: borrowId,
@@ -736,7 +746,6 @@ app.delete("/borrows/:id", requireAuth, async (req, res) => {
       });
     }
 
-    // Restore one available copy.
     const bookResult = await booksCollection.updateOne(
       { _id: borrow.bookId },
       {
@@ -745,7 +754,6 @@ app.delete("/borrows/:id", requireAuth, async (req, res) => {
       }
     );
 
-    // Compensate if the book inventory could not be updated.
     if (!bookResult.matchedCount) {
       await borrowsCollection.updateOne(
         {
@@ -813,7 +821,12 @@ app.get("/book-image/:id", async (req, res) => {
 
     res.set({
       "Content-Type": book.imageMimeType || "image/jpeg",
-      "Cache-Control": "public, max-age=3600",
+
+      // Always fetch the latest book image.
+      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+      Pragma: "no-cache",
+      Expires: "0",
+
       "X-Content-Type-Options": "nosniff",
     });
 
@@ -862,8 +875,6 @@ const startServer = async () => {
   try {
     await connectDB();
 
-    // Prevent a user from having multiple active borrows
-    // for the same book.
     await borrowsCollection.createIndex(
       { bookId: 1, userId: 1 },
       {
