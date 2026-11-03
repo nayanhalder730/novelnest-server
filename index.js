@@ -100,6 +100,56 @@ const parseCopies = (value) => {
   return copies;
 };
 
+// ==================== ImgBB Upload ====================
+
+const uploadImageToImgBB = async (file) => {
+  const apiKey = process.env.IMGBB_API_KEY;
+
+  if (!apiKey) {
+    throw new Error(
+      "IMGBB_API_KEY is not configured on the server."
+    );
+  }
+
+  const formData = new FormData();
+
+  const imageBlob = new Blob([file.buffer], {
+    type: file.mimetype,
+  });
+
+  formData.append("image", imageBlob, file.originalname);
+
+  const response = await fetch(
+    `https://api.imgbb.com/1/upload?key=${encodeURIComponent(apiKey)}`,
+    {
+      method: "POST",
+      body: formData,
+    }
+  );
+
+  const result = await response.json().catch(() => null);
+
+  if (
+    !response.ok ||
+    !result?.success ||
+    !result?.data?.url
+  ) {
+    console.error("ImgBB upload failed:", result);
+
+    throw new Error(
+      "Unable to upload book image. Please try again."
+    );
+  }
+
+  return {
+    imageUrl: result.data.url,
+    imageName:
+      result.data.image?.filename || file.originalname,
+    imageMimeType:
+      result.data.image?.mime || file.mimetype,
+  };
+};
+
 const publicBookProjection = {
   imageData: 0,
 };
@@ -213,7 +263,8 @@ app.post(
       ) {
         return res.status(400).json({
           success: false,
-          message: "Please provide all required book information.",
+          message:
+            "Please provide all required book information.",
         });
       }
 
@@ -227,7 +278,8 @@ app.post(
       if (!copies) {
         return res.status(400).json({
           success: false,
-          message: "Total copies must be a positive integer.",
+          message:
+            "Total copies must be a positive integer.",
         });
       }
 
@@ -238,6 +290,8 @@ app.post(
         });
       }
 
+      const uploadedImage = await uploadImageToImgBB(req.file);
+
       const newBook = {
         title: title.trim(),
         author: author.trim(),
@@ -247,9 +301,9 @@ app.post(
         totalCopies: copies,
         availableCopies: copies,
 
-        imageData: req.file.buffer,
-        imageMimeType: req.file.mimetype,
-        imageName: req.file.originalname,
+        imageUrl: uploadedImage.imageUrl,
+        imageMimeType: uploadedImage.imageMimeType,
+        imageName: uploadedImage.imageName,
 
         userId: req.user.id,
         userName: req.user.name,
@@ -271,7 +325,8 @@ app.post(
 
       res.status(500).json({
         success: false,
-        message: "Failed to add book.",
+        message:
+          error.message || "Failed to add book.",
       });
     }
   }
@@ -331,7 +386,8 @@ app.patch(
       if (!existingBook) {
         return res.status(404).json({
           success: false,
-          message: "Book not found or you are not the owner.",
+          message:
+            "Book not found or you are not the owner.",
         });
       }
 
@@ -397,7 +453,8 @@ app.patch(
         if (!copies) {
           return res.status(400).json({
             success: false,
-            message: "Total copies must be a positive integer.",
+            message:
+              "Total copies must be a positive integer.",
           });
         }
 
@@ -417,9 +474,23 @@ app.patch(
       }
 
       if (req.file) {
-        updateData.imageData = req.file.buffer;
-        updateData.imageMimeType = req.file.mimetype;
-        updateData.imageName = req.file.originalname;
+        const uploadedImage = await uploadImageToImgBB(req.file);
+
+        updateData.imageUrl = uploadedImage.imageUrl;
+        updateData.imageMimeType =
+          uploadedImage.imageMimeType;
+        updateData.imageName = uploadedImage.imageName;
+      }
+
+      const updateOperation = {
+        $set: updateData,
+      };
+
+      // Remove old MongoDB binary after ImgBB replacement.
+      if (req.file) {
+        updateOperation.$unset = {
+          imageData: "",
+        };
       }
 
       const result = await booksCollection.updateOne(
@@ -427,9 +498,7 @@ app.patch(
           _id: bookId,
           userId: req.user.id,
         },
-        {
-          $set: updateData,
-        }
+        updateOperation
       );
 
       if (!result.matchedCount) {
@@ -448,7 +517,8 @@ app.patch(
 
       res.status(500).json({
         success: false,
-        message: "Failed to update book.",
+        message:
+          error.message || "Failed to update book.",
       });
     }
   }
@@ -460,6 +530,7 @@ app.delete("/books/:id", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
 
+    // Validate book ID
     if (!isValidId(id)) {
       return res.status(400).json({
         success: false,
@@ -469,6 +540,7 @@ app.delete("/books/:id", requireAuth, async (req, res) => {
 
     const bookId = getBookId(id);
 
+    // Check book ownership
     const book = await booksCollection.findOne({
       _id: bookId,
       userId: req.user.id,
@@ -481,38 +553,41 @@ app.delete("/books/:id", requireAuth, async (req, res) => {
       });
     }
 
+    // Check active borrow
     const activeBorrow = await borrowsCollection.findOne({
-      bookId,
+      bookId: bookId,
       status: "borrowed",
     });
 
     if (activeBorrow) {
-      return res.status(400).json({
+      return res.status(409).json({
         success: false,
-        message: "This book cannot be deleted while it is borrowed.",
+        message:
+          "This book cannot be deleted because it is currently borrowed. Please wait until it is returned.",
       });
     }
 
+    // Delete book
     const result = await booksCollection.deleteOne({
       _id: bookId,
       userId: req.user.id,
     });
 
-    if (!result.deletedCount) {
+    if (result.deletedCount === 0) {
       return res.status(404).json({
         success: false,
         message: "Book could not be deleted.",
       });
     }
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: "Book deleted successfully.",
     });
   } catch (error) {
     console.error("Delete book error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Failed to delete book.",
     });
@@ -593,7 +668,9 @@ app.post("/borrows", requireAuth, async (req, res) => {
     const borrowDocument = {
       bookId: objectBookId,
       bookTitle: borrowedBook?.title || "",
-      bookImage: borrowedBook ? `/book-image/${borrowedBook._id}` : "",
+      bookImage: borrowedBook
+        ? `/book-image/${borrowedBook._id}`
+        : "",
       userId: req.user.id,
       userName: req.user.name,
       userEmail: req.user.email,
@@ -604,7 +681,9 @@ app.post("/borrows", requireAuth, async (req, res) => {
       status: "borrowed",
     };
 
-    const result = await borrowsCollection.insertOne(borrowDocument);
+    const result = await borrowsCollection.insertOne(
+      borrowDocument
+    );
 
     reservedBookId = null;
 
@@ -626,7 +705,10 @@ app.post("/borrows", requireAuth, async (req, res) => {
           }
         );
       } catch (rollbackError) {
-        console.error("Borrow rollback error:", rollbackError);
+        console.error(
+          "Borrow rollback error:",
+          rollbackError
+        );
       }
     }
 
@@ -771,7 +853,8 @@ app.delete("/borrows/:id", requireAuth, async (req, res) => {
 
       return res.status(500).json({
         success: false,
-        message: "Book inventory could not be updated. Please try again.",
+        message:
+          "Book inventory could not be updated. Please try again.",
       });
     }
 
@@ -791,6 +874,7 @@ app.delete("/borrows/:id", requireAuth, async (req, res) => {
 
 // ==================== Book Image ====================
 
+
 app.get("/book-image/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -803,13 +887,32 @@ app.get("/book-image/:id", async (req, res) => {
       { _id: getBookId(id) },
       {
         projection: {
+          imageUrl: 1,
           imageData: 1,
           imageMimeType: 1,
         },
       }
     );
 
-    if (!book?.imageData) {
+    if (!book) {
+      return res.status(404).send("Book image not found.");
+    }
+
+    // New ImgBB images use redirect.
+    if (book.imageUrl) {
+      res.set({
+        "Cache-Control":
+          "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+        Pragma: "no-cache",
+        Expires: "0",
+        "X-Content-Type-Options": "nosniff",
+      });
+
+      return res.redirect(302, book.imageUrl);
+    }
+
+    // Legacy MongoDB binary image support.
+    if (!book.imageData) {
       return res.status(404).send("Book image not found.");
     }
 
@@ -821,21 +924,21 @@ app.get("/book-image/:id", async (req, res) => {
 
     res.set({
       "Content-Type": book.imageMimeType || "image/jpeg",
-
-      // Always fetch the latest book image.
-      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+      "Cache-Control":
+        "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
       Pragma: "no-cache",
       Expires: "0",
-
       "X-Content-Type-Options": "nosniff",
     });
 
     return res.send(imageBuffer);
   } catch (error) {
     console.error("Get book image error:", error);
+
     res.status(500).send("Failed to load book image.");
   }
 });
+
 
 // ==================== Error Handler ====================
 
@@ -887,7 +990,9 @@ const startServer = async () => {
     );
 
     app.listen(PORT, () => {
-      console.log(`NovelNest server running on port ${PORT}`);
+      console.log(
+        `NovelNest server running on port ${PORT}`
+      );
     });
   } catch (error) {
     console.error("Server startup failed:", error);

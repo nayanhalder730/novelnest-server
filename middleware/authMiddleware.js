@@ -1,37 +1,70 @@
 
-import { fromNodeHeaders } from "better-auth/node";
-import { auth } from "../auth.js";
+import { createRemoteJWKSet, jwtVerify } from "jose";
+
+const authBaseURL = process.env.BETTER_AUTH_URL?.replace(/\/+$/, "");
+
+if (!authBaseURL) {
+  throw new Error(
+    "BETTER_AUTH_URL is missing from backend environment variables"
+  );
+}
+
+// Better Auth public JWKS endpoint
+const JWKS = createRemoteJWKSet(
+  new URL(`${authBaseURL}/api/auth/jwks`)
+);
 
 const requireAuth = async (req, res, next) => {
+  const authorization = req.headers.authorization || "";
+  const [scheme, token] = authorization.split(" ");
+
+  if (scheme !== "Bearer" || !token) {
+    return res.status(401).json({
+      success: false,
+      message: "Unauthorized! Please login first.",
+    });
+  }
+
   try {
-    const session = await auth.api.getSession({
-      headers: fromNodeHeaders(req.headers),
+    const { payload } = await jwtVerify(token, JWKS, {
+      issuer: authBaseURL,
+      audience: authBaseURL,
     });
 
-    // Check whether the user has a valid session.
-    if (!session?.user || !session?.session) {
+    const userId = payload.sub;
+
+    if (typeof userId !== "string" || !userId) {
       return res.status(401).json({
         success: false,
-        message: "Unauthorized! Please login first.",
+        message: "Invalid authentication token.",
       });
     }
 
-    // Attach authenticated user information to request.
     req.user = {
-      id: session.user.id,
-      name: session.user.name || "Unknown User",
-      email: session.user.email?.toLowerCase() || "",
+      id: userId,
+      name:
+        typeof payload.name === "string"
+          ? payload.name
+          : "Unknown User",
+      email:
+        typeof payload.email === "string"
+          ? payload.email.toLowerCase()
+          : "",
     };
 
-    req.session = session.session;
-
-    next();
+    return next();
   } catch (error) {
-    console.error("Authentication middleware error:", error);
+    console.error("JWT verification failed:", error);
 
-    return res.status(500).json({
+    const code = error?.code || "";
+    const isKeyServiceError =
+      code.startsWith("ERR_JWKS") || code === "ERR_NETWORK";
+
+    return res.status(isKeyServiceError ? 503 : 401).json({
       success: false,
-      message: "Authentication service error.",
+      message: isKeyServiceError
+        ? "Authentication service is temporarily unavailable."
+        : "Invalid or expired authentication token. Please login again.",
     });
   }
 };
